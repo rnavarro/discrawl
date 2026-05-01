@@ -86,10 +86,13 @@ func (s *Syncer) channelList(
 	}
 
 	if unresolvedRequestedIDs(selected, requestedSet) > 0 {
-		if err := s.appendThreadCatalog(ctx, allChannels, threadParentIDs(topLevel)); err != nil {
-			return nil, false, err
+		requestedParents := requestedThreadParentIDs(allChannels, topLevel, requestedSet)
+		if len(requestedParents) > 0 {
+			if err := s.appendThreadCatalog(ctx, allChannels, requestedParents); err != nil {
+				return nil, false, err
+			}
+			selected = selectRequestedChannels(allChannels, storedByID, requestedSet)
 		}
-		selected = selectRequestedChannels(allChannels, storedByID, requestedSet)
 	}
 	return filterExcludedDiscordChannelsWithCatalog(
 		selected,
@@ -528,6 +531,22 @@ func threadParentIDs(channels []*discordgo.Channel) []string {
 		}
 	}
 	return parents
+}
+
+func requestedThreadParentIDs(allChannels map[string]*discordgo.Channel, topLevel []*discordgo.Channel, requested map[string]struct{}) []string {
+	parents := make([]string, 0, len(requested))
+	for id := range requested {
+		if ch, ok := allChannels[id]; ok && isThreadParent(ch) {
+			parents = append(parents, id)
+			continue
+		}
+		if ch, ok := allChannels[id]; ok && ch.ParentID != "" {
+			if parent, ok := allChannels[ch.ParentID]; ok && isThreadParent(parent) {
+				parents = append(parents, parent.ID)
+			}
+		}
+	}
+	return uniqueIDs(parents)
 }
 
 func storedThreadParentIDs(rows []store.ChannelRow) map[string]struct{} {
