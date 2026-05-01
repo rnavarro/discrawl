@@ -247,7 +247,7 @@ type Client struct {
 }
 
 func New(token string) (*Client, error) {
-	session, err := discordgo.New("Bot " + token)
+	session, err := discordgo.New(token)
 	if err != nil {
 		return nil, fmt.Errorf("create discord session: %w", err)
 	}
