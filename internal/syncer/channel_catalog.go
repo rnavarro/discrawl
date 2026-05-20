@@ -323,8 +323,8 @@ func (s *Syncer) appendActiveThreadCatalog(ctx context.Context, allChannels map[
 	active, err := s.client.GuildThreadsActive(ctx, guildID)
 	if err != nil {
 		if isMissingAccess(err) {
-			s.logger.Warn("guild active thread crawl skipped", "guild_id", guildID, "err", err)
-			return nil
+			s.logger.Warn("guild active thread crawl skipped, falling back to per-channel discovery", "guild_id", guildID, "err", err)
+			return s.appendThreadCatalog(ctx, allChannels, setToSlice(allowedParents))
 		}
 		return err
 	}
