@@ -186,13 +186,13 @@ func TestSyncToleratesArchivedThread403(t *testing.T) {
 	out = &lockedBuffer{}
 	svc = New(client, s, newTestLogger(out))
 	allChannels := map[string]*discordgo.Channel{"rules": client.channels["g1"][1]}
-	require.NoError(t, svc.appendThreadCatalog(ctx, allChannels, []string{"rules"}))
+	require.NoError(t, svc.appendThreadCatalog(ctx, allChannels, "g1", []string{"rules"}))
 	require.NotContains(t, out.String(), `level=WARN msg="thread archive crawl failed"`)
 
 	client.archivedErrors = nil
 	out = &lockedBuffer{}
 	svc = New(client, s, newTestLogger(out))
-	require.NoError(t, svc.appendThreadCatalog(ctx, allChannels, []string{"rules"}))
+	require.NoError(t, svc.appendThreadCatalog(ctx, allChannels, "g1", []string{"rules"}))
 
 	cursor, err = s.GetSyncState(ctx, channelThreadCatalogUnavailableScope("rules"))
 	require.NoError(t, err)
@@ -203,7 +203,7 @@ func TestSyncToleratesArchivedThread403(t *testing.T) {
 	}
 	out = &lockedBuffer{}
 	svc = New(client, s, newTestLogger(out))
-	require.NoError(t, svc.appendThreadCatalog(ctx, allChannels, []string{"rules"}))
+	require.NoError(t, svc.appendThreadCatalog(ctx, allChannels, "g1", []string{"rules"}))
 	require.Contains(t, out.String(), `level=WARN msg="thread archive crawl failed"`)
 }
 

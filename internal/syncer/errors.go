@@ -93,6 +93,8 @@ func unavailableReason(err error) string {
 	switch {
 	case isMissingAccess(err):
 		return "missing_access"
+	case isBotsOnly(err):
+		return "bots_only"
 	case isUnknownChannel(err):
 		return "unknown_channel"
 	default:
@@ -115,4 +117,16 @@ func isMissingAccess(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "403 Forbidden") || strings.Contains(msg, "Missing Access")
+}
+
+// isBotsOnly detects Discord error 20002: "Only bots can use this endpoint".
+// User tokens get this from per-channel active thread endpoints
+// (e.g. /channels/{id}/threads/active) which are bot-only.
+func isBotsOnly(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Only bots can use this endpoint") ||
+		(strings.Contains(msg, "http 403") && strings.Contains(msg, "\"code\": 20002"))
 }

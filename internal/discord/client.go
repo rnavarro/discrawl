@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -164,6 +165,30 @@ func (c *Client) GuildMembers(ctx context.Context, guildID string) ([]*discordgo
 			return out, nil
 		}
 	}
+}
+
+// SearchForumThreads discovers active forum threads using the guild message search
+// endpoint. This is a fallback for user tokens that cannot use
+// /channels/{id}/threads/active (bot-only, 20002) or /guilds/{id}/threads/active
+// (bot-only or 403) but CAN use the search API, which returns thread channel
+// objects in its response.
+func (c *Client) SearchForumThreads(ctx context.Context, guildID, channelID string) ([]*discordgo.Channel, error) {
+	reqCtx, cancel := c.requestContext(ctx)
+	defer cancel()
+
+	urlStr := fmt.Sprintf("guilds/%s/messages/search?channel_id=%s&limit=25", guildID, channelID)
+	body, err := c.session.Request("GET", urlStr, nil, discordgo.WithContext(reqCtx))
+	if err != nil {
+		return nil, fmt.Errorf("search forum threads for channel %s: %w", channelID, err)
+	}
+
+	var result struct {
+		Threads []*discordgo.Channel `json:"threads"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal search results for channel %s: %w", channelID, err)
+	}
+	return result.Threads, nil
 }
 
 func (c *Client) ChannelMessages(ctx context.Context, channelID string, limit int, beforeID, afterID string) ([]*discordgo.Message, error) {
