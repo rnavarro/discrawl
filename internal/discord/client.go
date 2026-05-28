@@ -176,7 +176,7 @@ func (c *Client) SearchForumThreads(ctx context.Context, guildID, channelID stri
 	reqCtx, cancel := c.requestContext(ctx)
 	defer cancel()
 
-	urlStr := discordgo.EndpointGuild(guildID) + "messages/search?channel_id=" + channelID + "&limit=25"
+	urlStr := discordgo.EndpointGuild(guildID) + "/messages/search?channel_id=" + channelID + "&limit=25"
 	body, err := c.session.RequestWithBucketID("GET", urlStr, nil, discordgo.EndpointGuild(guildID), discordgo.WithContext(reqCtx))
 	if err != nil {
 		return nil, fmt.Errorf("search forum threads for channel %s: %w", channelID, err)
