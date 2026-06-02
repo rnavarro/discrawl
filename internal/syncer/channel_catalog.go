@@ -53,7 +53,7 @@ func (s *Syncer) channelList(ctx context.Context, guildID string, requested []st
 	selected := selectRequestedChannels(allChannels, storedByID, requestedSet)
 	requestedForums := requestedForumParents(allChannels, requestedSet)
 	if len(requestedForums) > 0 {
-		if err := s.appendThreadCatalog(ctx, allChannels, setToSlice(requestedForums)); err != nil {
+		if err := s.appendThreadCatalog(ctx, allChannels, guildID, setToSlice(requestedForums)); err != nil {
 			return nil, false, err
 		}
 		selected = selectRequestedChannels(allChannels, storedByID, requestedSet)
@@ -62,7 +62,7 @@ func (s *Syncer) channelList(ctx context.Context, guildID string, requested []st
 	if unresolvedRequestedIDs(selected, requestedSet) > 0 {
 		requestedParents := requestedThreadParentIDs(allChannels, topLevel, requestedSet)
 		if len(requestedParents) > 0 {
-			if err := s.appendThreadCatalog(ctx, allChannels, requestedParents); err != nil {
+			if err := s.appendThreadCatalog(ctx, allChannels, guildID, requestedParents); err != nil {
 				return nil, false, err
 			}
 			selected = selectRequestedChannels(allChannels, storedByID, requestedSet)
@@ -97,7 +97,7 @@ func (s *Syncer) liveChannelList(ctx context.Context, guildID string, mode chann
 	}
 	parentIDs := fullSyncThreadParentIDs(channels, storedRows)
 	if len(storedThreadParentIDs(storedRows)) == 0 {
-		if err := s.appendThreadCatalog(ctx, allChannels, parentIDs); err != nil {
+		if err := s.appendThreadCatalog(ctx, allChannels, guildID, parentIDs); err != nil {
 			return nil, err
 		}
 	} else if err := s.appendActiveThreadCatalog(ctx, allChannels, guildID, parentIDs); err != nil {
@@ -106,7 +106,7 @@ func (s *Syncer) liveChannelList(ctx context.Context, guildID string, mode chann
 	return mapsToSlice(allChannels), nil
 }
 
-func (s *Syncer) appendThreadCatalog(ctx context.Context, allChannels map[string]*discordgo.Channel, parents []string) error {
+func (s *Syncer) appendThreadCatalog(ctx context.Context, allChannels map[string]*discordgo.Channel, guildID string, parents []string) error {
 	for _, parentID := range uniqueIDs(parents) {
 		channel := allChannels[parentID]
 		if !isThreadParent(channel) {
@@ -132,6 +132,31 @@ func (s *Syncer) appendThreadCatalog(ctx context.Context, allChannels map[string
 				allChannels[thread.ID] = thread
 			}
 		}
+
+		// If active threads were unavailable (user tokens get 20002 from the
+		// per-channel endpoint) and archived threads yielded nothing, try
+		// discovering forum threads via the guild message search API.
+		// This finds threads that are active (not archived) but invisible
+		// to user tokens through the normal thread listing endpoints.
+		if unavailable && len(filterThreadsByParent(allChannels, channel.ID)) == 0 && channel.Type == discordgo.ChannelTypeGuildForum {
+			s.logger.Info("falling back to search-based forum thread discovery", "channel_id", channel.ID, "guild_id", guildID)
+			searchThreads, err := s.client.SearchForumThreads(ctx, guildID, channel.ID)
+			if err != nil {
+				s.logger.Warn("search-based forum thread discovery failed", "channel_id", channel.ID, "err", err)
+			} else {
+				added := 0
+				for _, thread := range searchThreads {
+					if _, exists := allChannels[thread.ID]; !exists {
+						allChannels[thread.ID] = thread
+						added++
+					}
+				}
+				if added > 0 {
+					s.logger.Info("search-based forum thread discovery found threads", "channel_id", channel.ID, "added", added)
+				}
+			}
+		}
+
 		if !failed {
 			if err := s.clearThreadCatalogUnavailableChannel(ctx, channel.ID); err != nil {
 				return err
@@ -516,6 +541,18 @@ func channelKind(channel *discordgo.Channel) string {
 	default:
 		return fmt.Sprintf("type_%d", channel.Type)
 	}
+}
+
+// filterThreadsByParent returns thread channels from allChannels that have
+// the given parentID.
+func filterThreadsByParent(allChannels map[string]*discordgo.Channel, parentID string) []*discordgo.Channel {
+	var out []*discordgo.Channel
+	for _, ch := range allChannels {
+		if ch != nil && ch.ParentID == parentID && isThreadChannel(ch) {
+			out = append(out, ch)
+		}
+	}
+	return out
 }
 
 func channelTypeFromKind(kind string) discordgo.ChannelType {

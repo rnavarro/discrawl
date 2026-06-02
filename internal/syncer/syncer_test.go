@@ -87,6 +87,13 @@ func (f *fakeClient) GuildThreadsActive(_ context.Context, guildID string) ([]*d
 	return out, nil
 }
 
+func (f *fakeClient) SearchForumThreads(_ context.Context, guildID, channelID string) ([]*discordgo.Channel, error) {
+	if f.activeThreads != nil {
+		return f.activeThreads[channelID], nil
+	}
+	return nil, nil
+}
+
 func (f *fakeClient) ThreadsArchived(_ context.Context, channelID string, private bool) ([]*discordgo.Channel, error) {
 	f.threadCalls++
 	if f.archivedCalls == nil {
