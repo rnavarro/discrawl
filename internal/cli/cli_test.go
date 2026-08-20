@@ -3657,6 +3657,10 @@ func (f *fakeDiscordClient) ThreadsArchived(context.Context, string, bool, time.
 	return nil, nil
 }
 
+func (f *fakeDiscordClient) SearchForumThreads(context.Context, string, string) ([]*discordgo.Channel, error) {
+	return nil, nil
+}
+
 func (f *fakeDiscordClient) GuildMembers(context.Context, string) ([]*discordgo.Member, error) {
 	return nil, nil
 }
