@@ -194,21 +194,62 @@ func scopedThreadParentIDs(channels []*discordgo.Channel, exclusions channelExcl
 	return parents
 }
 
+// threadCatalogOutcome accumulates how the thread sources answered for one
+// parent channel, so the unavailable marker is decided once rather than
+// rewritten by each source in turn.
+type threadCatalogOutcome struct {
+	// failed reports that a required source did not return a thread list.
+	failed bool
+	// reason is the unavailability reason from the first required source that
+	// failed. Recording the first keeps the stored reason stable instead of
+	// letting a later source overwrite it.
+	reason string
+}
+
+// required records the result of a source whose failure means the catalog could
+// not be enumerated. A failure that describes an endpoint or token limitation
+// rather than a problem reading the channel is not counted.
+func (o *threadCatalogOutcome) required(reason string, ok bool) {
+	if ok || endpointLimitationReason(reason) {
+		return
+	}
+	o.failed = true
+	if o.reason == "" {
+		o.reason = reason
+	}
+}
+
+// endpointLimitationReason reports whether an unavailability reason describes a
+// limitation of the endpoint or the token rather than a problem reading the
+// channel. A user token is rejected by the bot-only active-thread endpoint on
+// every channel it asks about, so that rejection says nothing about whether the
+// channel's threads can be enumerated by other means.
+func endpointLimitationReason(reason string) bool {
+	return reason == "bots_only"
+}
+
 func (s *Syncer) appendThreadCatalog(ctx context.Context, allChannels map[string]*discordgo.Channel, guildID string, parents []string) error {
 	for _, parentID := range uniqueIDs(parents) {
 		channel := allChannels[parentID]
 		if !isThreadParent(channel) {
 			continue
 		}
-		unavailable, err := s.appendActiveThreads(ctx, allChannels, channel.ID, false)
+		reason, activeOK, err := s.appendActiveThreads(ctx, allChannels, channel.ID)
 		if err != nil {
 			return err
 		}
-		failed := unavailable
+		// Same meaning as before: the active listing was rejected rather than
+		// answering. The search fallback gate below reads this.
+		unavailable := !activeOK
+		outcome := threadCatalogOutcome{}
+		outcome.required(reason, activeOK)
 		for _, private := range archivedThreadPrivacy(channel) {
-			if s.appendArchivedThreads(ctx, allChannels, channel.ID, private, time.Time{}) {
-				failed = true
+			reason, ok := s.appendArchivedThreads(ctx, allChannels, channel.ID, private, time.Time{})
+			if private {
+				// Best effort only: see recordThreadCatalogOutcome.
+				continue
 			}
+			outcome.required(reason, ok)
 		}
 
 		// If active threads were unavailable (user tokens get 20002 from the
@@ -235,13 +276,49 @@ func (s *Syncer) appendThreadCatalog(ctx context.Context, allChannels map[string
 			}
 		}
 
-		if !failed {
-			if err := s.clearThreadCatalogUnavailableChannel(ctx, channel.ID); err != nil {
-				return err
-			}
+		if err := s.recordThreadCatalogOutcome(ctx, channel.ID, outcome); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// recordThreadCatalogOutcome writes or clears the thread-catalog-unavailable
+// marker once per parent, after every source has answered.
+//
+// A source failure counts only when it indicates a channel access problem, not
+// an endpoint or token limitation. Under a user token the bot-only active
+// listing returns 20002 for every channel and the private archive returns 403
+// for channels that are otherwise readable, so neither is evidence that the
+// catalog could not be enumerated. Counting them marked nearly every thread
+// parent on every run and, because all paths share one scope, let whichever
+// source answered last overwrite the reason recorded by the source that
+// actually failed. The active listing (when it fails for an access reason) and
+// the public archive are required, and the first of those to fail supplies the
+// reason.
+func (s *Syncer) recordThreadCatalogOutcome(ctx context.Context, channelID string, outcome threadCatalogOutcome) error {
+	if s == nil || s.store == nil || channelID == "" {
+		return nil
+	}
+	if !outcome.failed {
+		return s.clearThreadCatalogUnavailableChannel(ctx, channelID)
+	}
+	if outcome.reason == "" {
+		// The failure was not an access problem (a network error or a rate
+		// limit), so leave any existing marker as it stands.
+		return nil
+	}
+	scope := channelThreadCatalogUnavailableScope(channelID)
+	previous, err := s.store.GetSyncState(ctx, scope)
+	if err != nil {
+		return err
+	}
+	if previous == outcome.reason {
+		s.logger.Debug("channel thread crawl skipped", "channel_id", channelID, "reason", outcome.reason)
+	} else {
+		s.logger.Warn("channel thread crawl skipped", "channel_id", channelID, "reason", outcome.reason)
+	}
+	return s.store.SetSyncState(ctx, scope, outcome.reason)
 }
 
 func (s *Syncer) appendIncrementalArchivedThreadCatalog(ctx context.Context, allChannels map[string]*discordgo.Channel, parents []string) error {
@@ -255,25 +332,26 @@ func (s *Syncer) appendIncrementalArchivedThreadCatalog(ctx context.Context, all
 		if !isThreadParent(channel) {
 			continue
 		}
-		failed := false
+		outcome := threadCatalogOutcome{}
 		for _, private := range archivedThreadPrivacy(channel) {
 			scope := channelArchivedThreadCursorScope(channel.ID, private)
 			after, err := s.archivedThreadCursor(ctx, scope, initialCursor)
 			if err != nil {
 				return err
 			}
-			if s.appendArchivedThreads(ctx, allChannels, channel.ID, private, after) {
-				failed = true
+			reason, ok := s.appendArchivedThreads(ctx, allChannels, channel.ID, private, after)
+			if !private {
+				outcome.required(reason, ok)
+			}
+			if !ok {
 				continue
 			}
 			if err := s.store.SetSyncState(ctx, scope, scanStartedAt.Format(time.RFC3339Nano)); err != nil {
 				return err
 			}
 		}
-		if !failed {
-			if err := s.clearThreadCatalogUnavailableChannel(ctx, channel.ID); err != nil {
-				return err
-			}
+		if err := s.recordThreadCatalogOutcome(ctx, channel.ID, outcome); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -294,18 +372,24 @@ func (s *Syncer) archivedThreadInitialCursor(ctx context.Context, fallback time.
 	return parsed, nil
 }
 
-func (s *Syncer) appendArchivedThreads(ctx context.Context, allChannels map[string]*discordgo.Channel, channelID string, private bool, after time.Time) bool {
+// appendArchivedThreads crawls one archived-thread privacy. It reports the
+// unavailability reason and whether the source answered, leaving the decision
+// to record a marker to recordThreadCatalogOutcome.
+func (s *Syncer) appendArchivedThreads(ctx context.Context, allChannels map[string]*discordgo.Channel, channelID string, private bool, after time.Time) (string, bool) {
 	archived, err := s.client.ThreadsArchived(ctx, channelID, private, after)
 	if err != nil {
-		if !s.skipThreadCatalogUnavailableChannelByID(ctx, channelID, err, "thread archive crawl failed") {
+		reason := unavailableReason(err)
+		if reason == "" {
 			s.logger.Warn("thread archive crawl failed", "channel_id", channelID, "private", private, "err", err)
+		} else {
+			s.logger.Debug("thread archive crawl rejected", "channel_id", channelID, "private", private, "reason", reason)
 		}
-		return true
+		return reason, false
 	}
 	for _, thread := range archived {
 		allChannels[thread.ID] = thread
 	}
-	return false
+	return "", true
 }
 
 func (s *Syncer) archivedThreadCursor(ctx context.Context, scope string, initial time.Time) (time.Time, error) {
@@ -365,23 +449,22 @@ func (s *Syncer) appendActiveThreadCatalog(ctx context.Context, allChannels map[
 	return nil
 }
 
-func (s *Syncer) appendActiveThreads(ctx context.Context, allChannels map[string]*discordgo.Channel, channelID string, clearOnSuccess bool) (bool, error) {
+// appendActiveThreads crawls the active-thread listing. It reports the
+// unavailability reason and whether the source answered; an error that is not
+// an access problem is returned so the caller can fail the sync.
+func (s *Syncer) appendActiveThreads(ctx context.Context, allChannels map[string]*discordgo.Channel, channelID string) (string, bool, error) {
 	active, err := s.client.ThreadsActive(ctx, channelID)
 	if err != nil {
-		if s.skipThreadCatalogUnavailableChannelByID(ctx, channelID, err, "channel thread crawl skipped") {
-			return true, nil
+		reason := unavailableReason(err)
+		if reason == "" {
+			return "", false, err
 		}
-		return false, err
-	}
-	if clearOnSuccess {
-		if err := s.clearThreadCatalogUnavailableChannel(ctx, channelID); err != nil {
-			return false, err
-		}
+		return reason, false, nil
 	}
 	for _, thread := range active {
 		allChannels[thread.ID] = thread
 	}
-	return false, nil
+	return "", true, nil
 }
 
 func (s *Syncer) clearThreadCatalogUnavailableChannel(ctx context.Context, channelID string) error {

@@ -17,17 +17,23 @@ import (
 )
 
 type fakeClient struct {
-	guilds            []*discordgo.UserGuild
-	guildByID         map[string]*discordgo.Guild
-	channelByID       map[string]*discordgo.Channel
-	channels          map[string][]*discordgo.Channel
-	activeThreads     map[string][]*discordgo.Channel
-	guildThreads      map[string][]*discordgo.Channel
-	threadErrors      map[string]error
-	guildThreadErrs   map[string]error
-	publicArchived    map[string][]*discordgo.Channel
-	privateArchive    map[string][]*discordgo.Channel
-	archivedErrors    map[string]error
+	guilds          []*discordgo.UserGuild
+	guildByID       map[string]*discordgo.Guild
+	channelByID     map[string]*discordgo.Channel
+	channels        map[string][]*discordgo.Channel
+	activeThreads   map[string][]*discordgo.Channel
+	guildThreads    map[string][]*discordgo.Channel
+	threadErrors    map[string]error
+	guildThreadErrs map[string]error
+	publicArchived  map[string][]*discordgo.Channel
+	privateArchive  map[string][]*discordgo.Channel
+	archivedErrors  map[string]error
+	// archivedPrivateErrors fails only the private archive for a channel, the
+	// shape a user token produces against /threads/archived/private.
+	archivedPrivateErrors map[string]error
+	// searchThreads and searchCalls back the guild-search fallback.
+	searchThreads     map[string][]*discordgo.Channel
+	searchCalls       map[string]int
 	archivedCalls     map[string]int
 	archivedAfter     map[string][]time.Time
 	members           map[string][]*discordgo.Member
@@ -109,6 +115,15 @@ func (f *fakeClient) GuildThreadsActive(_ context.Context, guildID string) ([]*d
 }
 
 func (f *fakeClient) SearchForumThreads(_ context.Context, guildID, channelID string) ([]*discordgo.Channel, error) {
+	f.mu.Lock()
+	if f.searchCalls == nil {
+		f.searchCalls = make(map[string]int)
+	}
+	f.searchCalls[channelID]++
+	f.mu.Unlock()
+	if f.searchThreads != nil {
+		return f.searchThreads[channelID], nil
+	}
 	if f.activeThreads != nil {
 		return f.activeThreads[channelID], nil
 	}
@@ -131,6 +146,11 @@ func (f *fakeClient) ThreadsArchived(_ context.Context, channelID string, privat
 	f.archivedAfter[channelID+":"+kind] = append(f.archivedAfter[channelID+":"+kind], after)
 	if err := f.archivedErrors[channelID]; err != nil {
 		return nil, err
+	}
+	if private {
+		if err := f.archivedPrivateErrors[channelID]; err != nil {
+			return nil, err
+		}
 	}
 	var archived []*discordgo.Channel
 	if private {
