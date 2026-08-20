@@ -167,3 +167,39 @@ func TestSyntheticChannelClassificationUsesGeneratedPlaceholder(t *testing.T) {
 	require.False(t, isSyntheticChannel("123456123456", "general"))
 	require.False(t, isSyntheticChannel("123456123456", "channel-other"))
 }
+
+// TestCoverageMessageCapableChannelKinds pins which channel kinds Coverage
+// marks message-capable. channelKind (internal/syncer/channel_catalog.go)
+// never emits "thread_news" -- guild news threads map to
+// "thread_announcement" -- so that kind must stay excluded here.
+func TestCoverageMessageCapableChannelKinds(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "discrawl.db"))
+	require.NoError(t, err)
+	defer func() { _ = s.Close() }()
+
+	require.NoError(t, s.UpsertGuild(ctx, GuildRecord{ID: "g1", Name: "Guild One", RawJSON: `{}`}))
+
+	capable := []string{"text", "news", "announcement", "dm", "group_dm", "thread_public", "thread_private", "thread_announcement"}
+	notCapable := []string{"category", "forum", "voice", "type_13", "thread_news"}
+	for _, kind := range append(append([]string{}, capable...), notCapable...) {
+		require.NoError(t, s.UpsertChannel(ctx, ChannelRecord{ID: kind, GuildID: "g1", Kind: kind, Name: kind, RawJSON: `{}`}))
+	}
+
+	report, err := s.Coverage(ctx, "g1", time.Now())
+	require.NoError(t, err)
+	require.Len(t, report.Guilds, 1)
+
+	gotCapable := map[string]bool{}
+	for _, channel := range report.Guilds[0].Channels {
+		gotCapable[channel.Kind] = channel.MessageCapable
+	}
+	for _, kind := range capable {
+		require.Truef(t, gotCapable[kind], "expected kind %q to be message-capable", kind)
+	}
+	for _, kind := range notCapable {
+		require.Falsef(t, gotCapable[kind], "expected kind %q to NOT be message-capable", kind)
+	}
+}
