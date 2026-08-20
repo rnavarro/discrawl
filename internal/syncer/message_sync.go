@@ -894,6 +894,8 @@ func syncErrorOutcome(err error) string {
 		return "skipped_missing_access"
 	case "unknown_channel":
 		return "skipped_unknown_channel"
+	case "bots_only":
+		return "skipped_bots_only"
 	}
 	if isRetryableSyncError(context.TODO(), err) {
 		return "deferred_retryable"

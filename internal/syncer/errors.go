@@ -91,6 +91,11 @@ func isRetryableSyncError(ctx context.Context, err error) bool {
 
 func unavailableReason(err error) string {
 	switch {
+	// isBotsOnly must be checked before isMissingAccess: a 20002 "Only bots can
+	// use this endpoint" error arrives as "HTTP 403 Forbidden, {...}", which
+	// isMissingAccess's "403 Forbidden" substring match would otherwise claim.
+	case isBotsOnly(err):
+		return "bots_only"
 	case isMissingAccess(err):
 		return "missing_access"
 	case isUnknownChannel(err):
@@ -115,4 +120,16 @@ func isMissingAccess(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "403 Forbidden") || strings.Contains(msg, "Missing Access")
+}
+
+// isBotsOnly detects Discord error 20002: "Only bots can use this endpoint".
+// User tokens get this from per-channel active thread endpoints
+// (e.g. /channels/{id}/threads/active) which are bot-only.
+func isBotsOnly(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Only bots can use this endpoint") ||
+		(strings.Contains(msg, "http 403") && strings.Contains(msg, "\"code\": 20002"))
 }
