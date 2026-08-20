@@ -101,37 +101,66 @@ func TestSearchForumThreadsReturnsErrorOnForbidden(t *testing.T) {
 	require.Equal(t, int64(1), recorder.calls.Load(), "a 403 must not be retried")
 }
 
-// TestSearchForumThreadsTreats202AsError documents a real gap rather than a
-// desired behavior. Discord answers the search endpoint with HTTP 202 while it
-// builds the guild's message index, and expects the caller to retry after the
-// advertised delay. The vendored discordgo accepts only 200, 201 and 204, so a
-// 202 falls through to its default branch and becomes a REST error that reads
-// exactly like a permission failure: the caller cannot tell "index warming,
-// retry shortly" from "you may not read this channel", and the retry_after
-// hint in the body is lost. Callers that need to distinguish the two must
-// inspect the error text for the 202 status, because the vendored library is
-// deliberately left unchanged here.
-func TestSearchForumThreadsTreats202AsError(t *testing.T) {
-	body := map[string]any{
-		"code":              110000,
-		"message":           "Index not yet available. Try again later.",
-		"retry_after":       1.5,
-		"documents_indexed": 0,
-	}
+// TestSearchForumThreadsRetriesWhileIndexWarms covers the HTTP 202 the guild
+// message-search endpoint returns while Discord builds the guild's message
+// index. The body carries a retry_after hint, and the forked discordgo honours
+// it: the request is reissued after the advertised delay instead of surfacing
+// an error that reads like a permission failure.
+func TestSearchForumThreadsRetriesWhileIndexWarms(t *testing.T) {
+	var attempts atomic.Int64
 	client, recorder := newSearchForumThreadsClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(body)
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code":              110000,
+				"message":           "Index not yet available. Try again later.",
+				"retry_after":       0.01,
+				"documents_indexed": 0,
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"threads": []map[string]any{
+				{"id": "t1", "guild_id": "g1", "parent_id": "c1", "name": "warmed thread", "type": 11},
+			},
+			"messages": []any{},
+		})
 	})
 
 	threads, err := client.SearchForumThreads(context.Background(), "g1", "c1")
-	require.Error(t, err, "202 is treated as a failure, not as a retryable success")
+	require.NoError(t, err, "a 202 with a retry_after hint is retried, not reported as a failure")
+	require.Len(t, threads, 1)
+	require.Equal(t, "t1", threads[0].ID)
+	require.Equal(t, int64(2), recorder.calls.Load(), "the warming 202 is followed by exactly one retry")
+}
+
+// TestSearchForumThreadsGivesUpWhenIndexNeverWarms covers the other end of the
+// same path: an endpoint stuck on 202 exhausts the retry budget rather than
+// retrying forever, and the resulting error still names the status and the
+// Discord error code so the caller can tell index warming from a permission
+// failure.
+func TestSearchForumThreadsGivesUpWhenIndexNeverWarms(t *testing.T) {
+	client, recorder := newSearchForumThreadsClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code":              110000,
+			"message":           "Index not yet available. Try again later.",
+			"retry_after":       0.01,
+			"documents_indexed": 0,
+		})
+	})
+	client.session.MaxRestRetries = 2
+
+	threads, err := client.SearchForumThreads(context.Background(), "g1", "c1")
+	require.Error(t, err, "a 202 that never resolves still ends as an error")
 	require.Nil(t, threads)
 	require.ErrorContains(t, err, "search forum threads for channel c1")
-	// The status is the only thing separating this from a permission failure.
 	require.ErrorContains(t, err, "202")
 	require.ErrorContains(t, err, "110000")
-	require.Equal(t, int64(1), recorder.calls.Load(), "202 is not retried by the REST layer")
+	// One initial attempt plus MaxRestRetries retries.
+	require.Equal(t, int64(3), recorder.calls.Load(), "the retry budget bounds the number of attempts")
 }
 
 func TestSearchForumThreadsReturnsErrorOnMalformedBody(t *testing.T) {
