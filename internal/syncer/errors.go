@@ -27,10 +27,6 @@ func (s *Syncer) skipUnavailableChannel(ctx context.Context, channel *discordgo.
 	return s.skipUnavailableChannelByID(ctx, channel.ID, err, "channel message crawl skipped", channelMessageUnavailableScope)
 }
 
-func (s *Syncer) skipThreadCatalogUnavailableChannelByID(ctx context.Context, channelID string, err error, logMsg string) bool {
-	return s.skipUnavailableChannelByID(ctx, channelID, err, logMsg, channelThreadCatalogUnavailableScope)
-}
-
 func (s *Syncer) skipUnavailableChannelByID(ctx context.Context, channelID string, err error, logMsg string, scopeForChannel func(string) string) bool {
 	reason := unavailableReason(err)
 	if reason == "" {
