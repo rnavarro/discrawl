@@ -91,10 +91,13 @@ func isRetryableSyncError(ctx context.Context, err error) bool {
 
 func unavailableReason(err error) string {
 	switch {
-	case isMissingAccess(err):
-		return "missing_access"
+	// isBotsOnly must be checked before isMissingAccess: a 20002 "Only bots can
+	// use this endpoint" error arrives as "HTTP 403 Forbidden, {...}", which
+	// isMissingAccess's "403 Forbidden" substring match would otherwise claim.
 	case isBotsOnly(err):
 		return "bots_only"
+	case isMissingAccess(err):
+		return "missing_access"
 	case isUnknownChannel(err):
 		return "unknown_channel"
 	default:
