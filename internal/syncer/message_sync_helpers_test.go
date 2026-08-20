@@ -197,6 +197,17 @@ func TestMessageChannelConcurrentErrorAndProgressBranches(t *testing.T) {
 	require.Equal(t, "skipped", syncErrorOutcome(errors.New("plain")))
 }
 
+func TestSyncErrorOutcome(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "skipped_missing_access", syncErrorOutcome(errors.New("HTTP 403 Forbidden")))
+	require.Equal(t, "skipped_unknown_channel", syncErrorOutcome(errors.New(`HTTP 404 Not Found, {"message": "Unknown Channel", "code": 10003}`)))
+	require.Equal(t, "skipped_bots_only", syncErrorOutcome(errors.New("Only bots can use this endpoint")))
+	require.Equal(t, "skipped_bots_only", syncErrorOutcome(errors.New(`http 403 Forbidden, {"message": "Only bots can use this endpoint", "code": 20002}`)))
+	require.Equal(t, "deferred_retryable", syncErrorOutcome(errors.New("HTTP 503 Service Unavailable")))
+	require.Equal(t, "skipped", syncErrorOutcome(errors.New("boom")))
+}
+
 func TestMessageChannelConcurrentFatalErrorCancelsPeers(t *testing.T) {
 	t.Parallel()
 
