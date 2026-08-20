@@ -218,7 +218,7 @@ order by guild_id, position, name;
 -- name: ListIncompleteMessageChannelIDs :many
 select c.id
 from channels c
-where c.kind in ('text', 'news', 'announcement', 'thread_public', 'thread_private', 'thread_news', 'thread_announcement')
+where c.kind in ('text', 'news', 'announcement', 'thread_public', 'thread_private', 'thread_announcement')
   and not exists (
 	select 1
 	from sync_state s
@@ -234,7 +234,7 @@ order by c.id;
 -- name: ListIncompleteMessageChannelIDsByGuild :many
 select c.id
 from channels c
-where c.kind in ('text', 'news', 'announcement', 'thread_public', 'thread_private', 'thread_news', 'thread_announcement')
+where c.kind in ('text', 'news', 'announcement', 'thread_public', 'thread_private', 'thread_announcement')
   and c.guild_id = ?
   and not exists (
 	select 1

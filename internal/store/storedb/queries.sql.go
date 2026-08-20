@@ -792,7 +792,7 @@ func (q *Queries) ListGuildIDs(ctx context.Context) ([]string, error) {
 const listIncompleteMessageChannelIDs = `-- name: ListIncompleteMessageChannelIDs :many
 select c.id
 from channels c
-where c.kind in ('text', 'news', 'announcement', 'thread_public', 'thread_private', 'thread_news', 'thread_announcement')
+where c.kind in ('text', 'news', 'announcement', 'thread_public', 'thread_private', 'thread_announcement')
   and not exists (
 	select 1
 	from sync_state s
@@ -832,7 +832,7 @@ func (q *Queries) ListIncompleteMessageChannelIDs(ctx context.Context) ([]string
 const listIncompleteMessageChannelIDsByGuild = `-- name: ListIncompleteMessageChannelIDsByGuild :many
 select c.id
 from channels c
-where c.kind in ('text', 'news', 'announcement', 'thread_public', 'thread_private', 'thread_news', 'thread_announcement')
+where c.kind in ('text', 'news', 'announcement', 'thread_public', 'thread_private', 'thread_announcement')
   and c.guild_id = ?
   and not exists (
 	select 1
