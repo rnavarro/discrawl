@@ -24,6 +24,17 @@ const (
 	channelCatalogIncremental
 )
 
+// searchDiscoveryInterval throttles the guild-search fallback for forums that
+// already have known threads. Under a user token the active-thread endpoints
+// are bot-only, so the search fallback is the only way to discover newly
+// created active forum threads; without a throttle it would run on every
+// forum on every sync.
+const searchDiscoveryInterval = 6 * time.Hour
+
+func channelSearchDiscoveryScope(channelID string) string {
+	return "channel:" + channelID + ":search_thread_discovery_at"
+}
+
 func (s *Syncer) channelList(
 	ctx context.Context,
 	guildID string,
@@ -218,11 +229,13 @@ func (s *Syncer) appendThreadCatalog(ctx context.Context, allChannels map[string
 		}
 
 		// If active threads were unavailable (user tokens get 20002 from the
-		// per-channel endpoint) and archived threads yielded nothing, try
-		// discovering forum threads via the guild message search API.
-		// This finds threads that are active (not archived) but invisible
-		// to user tokens through the normal thread listing endpoints.
-		if unavailable && len(filterThreadsByParent(allChannels, channel.ID)) == 0 && channel.Type == discordgo.ChannelTypeGuildForum {
+		// per-channel endpoint), try discovering forum threads via the guild
+		// message search API. This finds threads that are active (not
+		// archived) but invisible to user tokens through the normal thread
+		// listing endpoints. For forums that already have known threads the
+		// scan is throttled: a new active thread is otherwise invisible until
+		// it is archived, so the archive crawl alone never backfills it.
+		if unavailable && channel.Type == discordgo.ChannelTypeGuildForum && s.searchDiscoveryDue(ctx, channel.ID, len(filterThreadsByParent(allChannels, channel.ID))) {
 			s.logger.Info("falling back to search-based forum thread discovery", "channel_id", channel.ID, "guild_id", guildID)
 			searchThreads, err := s.client.SearchForumThreads(ctx, guildID, channel.ID)
 			if err != nil {
@@ -238,6 +251,11 @@ func (s *Syncer) appendThreadCatalog(ctx context.Context, allChannels map[string
 				if added > 0 {
 					s.logger.Info("search-based forum thread discovery found threads", "channel_id", channel.ID, "added", added)
 				}
+				if s.store != nil {
+					if err := s.store.SetSyncState(ctx, channelSearchDiscoveryScope(channel.ID), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+						return err
+					}
+				}
 			}
 		}
 
@@ -248,6 +266,29 @@ func (s *Syncer) appendThreadCatalog(ctx context.Context, allChannels map[string
 		}
 	}
 	return nil
+}
+
+// searchDiscoveryDue reports whether the guild-search fallback may run for a
+// forum parent. It always runs when no threads were seen for the parent (the
+// original rescue path); otherwise it is throttled to once per
+// searchDiscoveryInterval so known forums still pick up newly created active
+// threads without paying a search request on every sync.
+func (s *Syncer) searchDiscoveryDue(ctx context.Context, channelID string, seenThreads int) bool {
+	if seenThreads == 0 {
+		return true
+	}
+	if s == nil || s.store == nil {
+		return false
+	}
+	raw, err := s.store.GetSyncState(ctx, channelSearchDiscoveryScope(channelID))
+	if err != nil || raw == "" {
+		return true
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return true
+	}
+	return time.Since(parsed) >= searchDiscoveryInterval
 }
 
 func (s *Syncer) appendIncrementalArchivedThreadCatalog(ctx context.Context, allChannels map[string]*discordgo.Channel, parents []string) error {

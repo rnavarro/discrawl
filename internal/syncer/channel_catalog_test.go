@@ -17,6 +17,96 @@ func errMissingAccess() error {
 	return errors.New("HTTP 403 Forbidden, {\"message\": \"Missing Access\", \"code\": 50001}")
 }
 
+func errBotsOnly() error {
+	return errors.New("HTTP 403 Forbidden, {\"message\": \"Only bots can use this endpoint\", \"code\": 20002}")
+}
+
+// threadCatalogFixture builds a store-backed Syncer whose client knows a
+// single thread parent of the given type in guild g1. Returns the store, the
+// syncer, and the allChannels map threaded through appendThreadCatalog.
+func threadCatalogFixture(t *testing.T, client *fakeClient, channelType discordgo.ChannelType) (context.Context, *store.Store, *Syncer, map[string]*discordgo.Channel, *lockedBuffer) {
+	t.Helper()
+
+	ctx := context.Background()
+	s, err := store.Open(ctx, filepath.Join(t.TempDir(), "discrawl.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	client.channels = map[string][]*discordgo.Channel{
+		"g1": {{ID: "f1", GuildID: "g1", Name: "forum", Type: channelType}},
+	}
+	out := &lockedBuffer{}
+	svc := New(client, s, newTestLogger(out))
+	allChannels := map[string]*discordgo.Channel{
+		"f1": client.channels["g1"][0],
+	}
+	return ctx, s, svc, allChannels, out
+}
+
+// A forum with already-known threads must still get search-based discovery
+// when the active listing is bot-only: a newly created active thread is
+// invisible to user tokens until it is archived, so the archive crawl alone
+// never backfills it. The first run fires and records the discovery cursor;
+// a run within the interval must not re-pay the search request.
+func TestSearchDiscoveryRunsForKnownForumAndThrottles(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{
+		threadErrors: map[string]error{"f1": errBotsOnly()},
+		searchThreads: map[string][]*discordgo.Channel{
+			"f1": {{ID: "s1", GuildID: "g1", ParentID: "f1", Name: "found by search", Type: discordgo.ChannelTypeGuildPublicThread}},
+		},
+	}
+	ctx, s, svc, allChannels, _ := threadCatalogFixture(t, client, discordgo.ChannelTypeGuildForum)
+	// The forum already has one known thread, so this is the throttled path,
+	// not the zero-known-threads rescue path.
+	allChannels["k1"] = &discordgo.Channel{ID: "k1", GuildID: "g1", ParentID: "f1", Type: discordgo.ChannelTypeGuildPublicThread}
+
+	require.NoError(t, svc.appendThreadCatalog(ctx, allChannels, "g1", []string{"f1"}))
+	require.Equal(t, 1, client.searchCalls["f1"], "first discovery for a known forum must fire")
+	require.Contains(t, allChannels, "s1")
+	raw, err := s.GetSyncState(ctx, channelSearchDiscoveryScope("f1"))
+	require.NoError(t, err)
+	require.NotEmpty(t, raw, "a successful search must record the discovery cursor")
+
+	require.NoError(t, svc.appendThreadCatalog(ctx, allChannels, "g1", []string{"f1"}))
+	require.Equal(t, 1, client.searchCalls["f1"], "a run within the interval must not re-pay the search")
+}
+
+func TestSearchDiscoveryFiresAgainAfterInterval(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{
+		threadErrors: map[string]error{"f1": errBotsOnly()},
+		searchThreads: map[string][]*discordgo.Channel{
+			"f1": {{ID: "s1", GuildID: "g1", ParentID: "f1", Name: "found by search", Type: discordgo.ChannelTypeGuildPublicThread}},
+		},
+	}
+	ctx, s, svc, allChannels, _ := threadCatalogFixture(t, client, discordgo.ChannelTypeGuildForum)
+	allChannels["k1"] = &discordgo.Channel{ID: "k1", GuildID: "g1", ParentID: "f1", Type: discordgo.ChannelTypeGuildPublicThread}
+
+	stale := time.Now().UTC().Add(-searchDiscoveryInterval - time.Minute).Format(time.RFC3339Nano)
+	require.NoError(t, s.SetSyncState(ctx, channelSearchDiscoveryScope("f1"), stale))
+
+	require.NoError(t, svc.appendThreadCatalog(ctx, allChannels, "g1", []string{"f1"}))
+	require.Equal(t, 1, client.searchCalls["f1"], "a stale cursor must let the search run again")
+}
+
+func TestSearchDiscoverySkippedWithinInterval(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{
+		threadErrors: map[string]error{"f1": errBotsOnly()},
+	}
+	ctx, s, svc, allChannels, _ := threadCatalogFixture(t, client, discordgo.ChannelTypeGuildForum)
+	allChannels["k1"] = &discordgo.Channel{ID: "k1", GuildID: "g1", ParentID: "f1", Type: discordgo.ChannelTypeGuildPublicThread}
+
+	require.NoError(t, s.SetSyncState(ctx, channelSearchDiscoveryScope("f1"), time.Now().UTC().Format(time.RFC3339Nano)))
+
+	require.NoError(t, svc.appendThreadCatalog(ctx, allChannels, "g1", []string{"f1"}))
+	require.Zero(t, client.searchCalls["f1"], "a fresh cursor must suppress the search")
+}
+
 func TestActiveThreadCatalogEdges(t *testing.T) {
 	t.Parallel()
 
