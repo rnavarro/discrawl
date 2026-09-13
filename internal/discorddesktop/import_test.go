@@ -558,3 +558,43 @@ https://discord.com/channels/999999999999999997/111111111111111118
 	require.NoError(t, err)
 	require.Empty(t, results)
 }
+
+func TestImportKeepsPinnedGuildNameAgainstFallback(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "Cache", "Cache_Data")
+	require.NoError(t, os.MkdirAll(cachePath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cachePath, "guild_0"), []byte(`https://discord.com/channels/966447187586338876/111111111111111116
+{"id":"333333333333333338","channel_id":"111111111111111116","content":"wiretap guild message","timestamp":"2026-04-23T18:20:45Z","author":{"id":"222222222222222227","username":"carol"}}`), 0o600))
+
+	st, err := store.Open(ctx, filepath.Join(dir, "discrawl.db"))
+	require.NoError(t, err)
+	defer func() { _ = st.Close() }()
+
+	// The operator pinned the real name the Discord API will not serve.
+	require.NoError(t, st.UpsertGuild(ctx, store.GuildRecord{
+		ID:      "966447187586338876",
+		Name:    "apalrd's adventures",
+		RawJSON: `{}`,
+	}))
+
+	guildName := func() string {
+		t.Helper()
+		_, rows, err := st.ReadOnlyQuery(ctx, "select name from guilds where id = '966447187586338876'")
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		return rows[0][0]
+	}
+
+	stats, err := Import(ctx, st, Options{Path: dir})
+	require.NoError(t, err)
+	require.Equal(t, 1, stats.GuildMessages)
+	require.Equal(t, "apalrd's adventures", guildName(), "wiretap import must not overwrite a real guild name with the fallback")
+
+	// A second scheduled import must not regress it either.
+	require.NoError(t, os.WriteFile(filepath.Join(cachePath, "guild_1"), []byte(`https://discord.com/channels/966447187586338876/111111111111111117
+{"id":"333333333333333339","channel_id":"111111111111111117","content":"second wiretap guild message","timestamp":"2026-04-23T18:21:45Z","author":{"id":"222222222222222227","username":"carol"}}`), 0o600))
+	_, err = Import(ctx, st, Options{Path: dir})
+	require.NoError(t, err)
+	require.Equal(t, "apalrd's adventures", guildName())
+}

@@ -358,7 +358,7 @@ func guildName(id string) string {
 	case DirectMessageGuildID:
 		return DirectMessageGuildName
 	default:
-		return "Discord Desktop Guild " + id
+		return store.PlaceholderGuildNamePrefix + id
 	}
 }
 

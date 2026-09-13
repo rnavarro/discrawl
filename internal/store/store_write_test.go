@@ -1289,3 +1289,117 @@ func TestOpenRebuildsLegacyFTSRowIDs(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Equal(t, messageID, results[0].MessageID)
 }
+
+func TestUpsertGuildNameOnlyMovesTowardMoreInformation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "discrawl.db"))
+	require.NoError(t, err)
+	defer func() { _ = s.Close() }()
+
+	const id = "966447187586338876"
+	standIn := PlaceholderGuildNamePrefix + id
+
+	storedName := func() string {
+		t.Helper()
+		var name string
+		require.NoError(t, s.DB().QueryRowContext(ctx, `select name from guilds where id = ?`, id).Scan(&name))
+		return name
+	}
+	seed := func(name string) {
+		t.Helper()
+		_, err := s.DB().ExecContext(ctx,
+			`insert into guilds(id, name, raw_json, updated_at) values(?, ?, '{}', '2026-09-12T00:00:00.000000000Z')
+			 on conflict(id) do update set name = excluded.name`, id, name)
+		require.NoError(t, err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		stored   string
+		incoming string
+		want     string
+	}{
+		{"real over real applies a genuine rename", "apalrd's adventures", "apalrd's lab", "apalrd's lab"},
+		{"real over stand-in resolves the name", standIn, "apalrd's adventures", "apalrd's adventures"},
+		{"real over blank resolves the name", "", "apalrd's adventures", "apalrd's adventures"},
+		{"stand-in over real keeps the real name", "apalrd's adventures", standIn, "apalrd's adventures"},
+		{"stand-in over stand-in is a no-op", standIn, standIn, standIn},
+		{"stand-in over blank restores the stand-in", "", standIn, standIn},
+		{"stand-in over the bare id replaces it", id, standIn, standIn},
+		{"blank over real keeps the real name", "apalrd's adventures", "", "apalrd's adventures"},
+		{"blank over a stand-in keeps the stand-in", standIn, "", standIn},
+		{"blank over the bare id keeps the bare id", id, "", id},
+		{"real over the bare id resolves the name", id, "apalrd's adventures", "apalrd's adventures"},
+		{"a digit name is real and still applies", "apalrd's adventures", "1337", "1337"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seed(tc.stored)
+			require.NoError(t, s.UpsertGuild(ctx, GuildRecord{ID: id, Name: tc.incoming, RawJSON: `{}`}))
+			require.Equal(t, tc.want, storedName())
+		})
+	}
+}
+
+func TestUpsertGuildStoresNameForUnseenGuildAndRefreshesRestOfRow(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "discrawl.db"))
+	require.NoError(t, err)
+	defer func() { _ = s.Close() }()
+
+	storedName := func(id string) string {
+		t.Helper()
+		var name string
+		require.NoError(t, s.DB().QueryRowContext(ctx, `select name from guilds where id = ?`, id).Scan(&name))
+		return name
+	}
+
+	// A guild the archive has never seen keeps whatever name it arrives with,
+	// so the display fallback still works.
+	require.NoError(t, s.UpsertGuild(ctx, GuildRecord{ID: "g1", Name: PlaceholderGuildNamePrefix + "g1", RawJSON: `{}`}))
+	require.Equal(t, PlaceholderGuildNamePrefix+"g1", storedName("g1"))
+	require.NoError(t, s.UpsertGuild(ctx, GuildRecord{ID: "g2", Name: "", RawJSON: `{}`}))
+	require.Empty(t, storedName("g2"))
+
+	// Holding a name back must not hold back the rest of the row.
+	require.NoError(t, s.UpsertGuild(ctx, GuildRecord{ID: "g3", Name: "apalrd's adventures", RawJSON: `{}`}))
+	require.NoError(t, s.UpsertGuild(ctx, GuildRecord{
+		ID: "g3", Name: PlaceholderGuildNamePrefix + "g3", Icon: "icon-b", RawJSON: `{"wiretap":true}`,
+	}))
+	var name, icon, raw string
+	require.NoError(t, s.DB().QueryRowContext(ctx,
+		`select name, coalesce(icon, ''), raw_json from guilds where id = 'g3'`).Scan(&name, &icon, &raw))
+	require.Equal(t, "apalrd's adventures", name)
+	require.Equal(t, "icon-b", icon)
+	require.Equal(t, `{"wiretap":true}`, raw)
+}
+
+func TestResolveGuildNameAndPlaceholderPredicate(t *testing.T) {
+	t.Parallel()
+
+	const id = "966447187586338876"
+	for _, tc := range []struct {
+		name        string
+		placeholder bool
+	}{
+		{PlaceholderGuildNamePrefix + id, true},
+		{id, true},
+		{" " + id + " ", true},
+		{"", false},
+		{"apalrd's adventures", false},
+		{"1337", false},
+		{"Discord Direct Messages", false},
+		{"Synthetic", false},
+	} {
+		require.Equal(t, tc.placeholder, isPlaceholderGuildName(id, tc.name), "name %q", tc.name)
+	}
+
+	// Whitespace-only names carry nothing and never displace a stored name.
+	require.Equal(t, "apalrd's adventures", ResolveGuildName(id, "   ", "apalrd's adventures"))
+	require.Equal(t, "apalrd's adventures", ResolveGuildName(id, "", "apalrd's adventures"))
+	// An unseen guild has no stored name, so the incoming name is kept as-is.
+	require.Equal(t, PlaceholderGuildNamePrefix+id, ResolveGuildName(id, PlaceholderGuildNamePrefix+id, ""))
+}

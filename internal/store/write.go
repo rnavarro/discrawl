@@ -121,13 +121,39 @@ type WriteOptions struct {
 const deleteMessageFTSByRowIDSQL = `delete from message_fts where rowid = ?`
 
 func (s *Store) UpsertGuild(ctx context.Context, guild GuildRecord) error {
-	return s.q.UpsertGuild(ctx, storedb.UpsertGuildParams{
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	name, err := effectiveGuildName(ctx, tx, guild.ID, guild.Name)
+	if err != nil {
+		return err
+	}
+	if err := s.q.WithTx(tx).UpsertGuild(ctx, storedb.UpsertGuildParams{
 		ID:        guild.ID,
-		Name:      guild.Name,
+		Name:      name,
 		Icon:      nullString(guild.Icon),
 		RawJson:   guild.RawJSON,
 		UpdatedAt: time.Now().UTC().Format(timeLayout),
-	})
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// effectiveGuildName applies ResolveGuildName to the name already stored for a
+// guild. The stored name is read inside the caller's transaction, so it is the
+// same row version the upsert then writes.
+func effectiveGuildName(ctx context.Context, tx *sql.Tx, guildID, incoming string) (string, error) {
+	var stored string
+	switch err := tx.QueryRowContext(ctx, `select name from guilds where id = ?`, guildID).Scan(&stored); {
+	case errors.Is(err, sql.ErrNoRows):
+		return incoming, nil
+	case err != nil:
+		return "", fmt.Errorf("read stored guild name: %w", err)
+	}
+	return ResolveGuildName(guildID, incoming, stored), nil
 }
 
 func (s *Store) MarkGuildDeleted(ctx context.Context, guildID, source, reason string) error {

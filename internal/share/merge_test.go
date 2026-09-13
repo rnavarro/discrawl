@@ -423,3 +423,80 @@ func removeManifestTable(tables []snapshot.TableManifest, name string) []snapsho
 	}
 	return out
 }
+
+func TestMergeKeepsRealGuildNameAgainstPlaceholderSnapshotRow(t *testing.T) {
+	ctx := context.Background()
+	src, err := store.Open(ctx, filepath.Join(t.TempDir(), "src.db"))
+	require.NoError(t, err)
+	defer func() { _ = src.Close() }()
+	dst, err := store.Open(ctx, filepath.Join(t.TempDir(), "dst.db"))
+	require.NoError(t, err)
+	defer func() { _ = dst.Close() }()
+
+	// The merging install already knows the real name.
+	require.NoError(t, dst.UpsertGuild(ctx, store.GuildRecord{
+		ID:      "966447187586338876",
+		Name:    "apalrd's adventures",
+		RawJSON: `{}`,
+	}))
+
+	// The published snapshot only carries the wiretap stand-in, and carries it
+	// with a newer revision so the merge actually applies the row.
+	require.NoError(t, src.UpsertGuild(ctx, store.GuildRecord{
+		ID:      "966447187586338876",
+		Name:    store.PlaceholderGuildNamePrefix + "966447187586338876",
+		RawJSON: `{"source":"discord_desktop"}`,
+	}))
+	require.NoError(t, src.UpsertChannel(ctx, store.ChannelRecord{
+		ID: "c1", GuildID: "966447187586338876", Kind: "text", Name: "general", RawJSON: `{}`,
+	}))
+
+	repo := filepath.Join(t.TempDir(), "share")
+	opts := Options{RepoPath: repo, Branch: "main"}
+	_, err = Export(ctx, src, opts)
+	require.NoError(t, err)
+
+	_, changed, err := MergeIfChanged(ctx, dst, opts)
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	var name, raw string
+	require.NoError(t, dst.DB().QueryRowContext(ctx,
+		`select name, raw_json from guilds where id = '966447187586338876'`).Scan(&name, &raw))
+	require.Equal(t, "apalrd's adventures", name, "snapshot merge must not overwrite a real guild name with the fallback")
+	require.JSONEq(t, `{"source":"discord_desktop"}`, raw, "the rest of the merged guild row still applies")
+}
+
+func TestMergeKeepsStandInGuildNameAgainstBlankSnapshotRow(t *testing.T) {
+	ctx := context.Background()
+	src, err := store.Open(ctx, filepath.Join(t.TempDir(), "src.db"))
+	require.NoError(t, err)
+	defer func() { _ = src.Close() }()
+	dst, err := store.Open(ctx, filepath.Join(t.TempDir(), "dst.db"))
+	require.NoError(t, err)
+	defer func() { _ = dst.Close() }()
+
+	const id = "966447187586338876"
+	standIn := store.PlaceholderGuildNamePrefix + id
+
+	// The merging install only has the stand-in, which still beats nothing.
+	require.NoError(t, dst.UpsertGuild(ctx, store.GuildRecord{ID: id, Name: standIn, RawJSON: `{}`}))
+
+	// The published snapshot carries no name at all, at a newer revision.
+	require.NoError(t, src.UpsertGuild(ctx, store.GuildRecord{ID: id, Name: "", RawJSON: `{"source":"discord_desktop"}`}))
+	require.NoError(t, src.UpsertChannel(ctx, store.ChannelRecord{
+		ID: "c1", GuildID: id, Kind: "text", Name: "general", RawJSON: `{}`,
+	}))
+
+	repo := filepath.Join(t.TempDir(), "share")
+	opts := Options{RepoPath: repo, Branch: "main"}
+	_, err = Export(ctx, src, opts)
+	require.NoError(t, err)
+	_, changed, err := MergeIfChanged(ctx, dst, opts)
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	var name string
+	require.NoError(t, dst.DB().QueryRowContext(ctx, `select name from guilds where id = ?`, id).Scan(&name))
+	require.Equal(t, standIn, name, "a blank merged name must not erase the stand-in the archive already had")
+}

@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/openclaw/discrawl/internal/store"
 )
 
 func importTable(ctx context.Context, tx *sql.Tx, opts Options, table TableManifest) error {
@@ -259,10 +261,31 @@ func upsertMergeSnapshotRow(ctx context.Context, tx *sql.Tx, table string, row m
 			return false, err
 		}
 	}
+	if table == "guilds" {
+		if err := preserveRealGuildName(ctx, tx, row); err != nil {
+			return false, err
+		}
+	}
 	// Guild/member revisions were compared chronologically above. Reapplying the
 	// generic lexical SQL guard would reject valid RFC3339 offset timestamps.
 	protectNewer := slices.Contains([]string{"channels", "messages"}, table)
 	return upsertSnapshotRow(ctx, tx, table, row, protectNewer)
+}
+
+// preserveRealGuildName applies the same guild-name rule as the store's own
+// upsert to a merged snapshot row, so the two writers cannot diverge. The
+// stored name is read in the import transaction that then writes the row.
+func preserveRealGuildName(ctx context.Context, tx *sql.Tx, row map[string]any) error {
+	id := stringValue(row["id"])
+	var stored string
+	switch err := tx.QueryRowContext(ctx, `select name from guilds where id = ?`, importValue(row["id"])).Scan(&stored); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("read existing guild name: %w", err)
+	}
+	row["name"] = store.ResolveGuildName(id, stringValue(row["name"]), stored)
+	return nil
 }
 
 func shouldMergeTombstoneEntityRow(ctx context.Context, tx *sql.Tx, table string, row map[string]any) (bool, error) {
