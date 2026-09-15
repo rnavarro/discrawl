@@ -50,3 +50,5 @@ require (
 	modernc.org/memory v1.12.1 // indirect
 	modernc.org/sqlite v1.58.0 // indirect
 )
+
+replace github.com/bwmarrin/discordgo => github.com/rnavarro/discordgo v0.29.0-base.0.20260820164511-79c864391b0c
